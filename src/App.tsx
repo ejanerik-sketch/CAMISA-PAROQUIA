@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ShoppingCart, User, CheckCircle, Plus, Minus, ArrowLeft, FileText, MapPin, Phone, Users, Download, Edit2, Send, Lock, LogOut, UserPlus, Trash2, Copy, CreditCard, AlertCircle } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -1409,48 +1409,117 @@ export default function App() {
   const [currentOrder, setCurrentOrder] = useState<Order | null>(null);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   
-  const [user, setUser] = useState<any>(JSON.parse(localStorage.getItem('nsf_user') || 'null'));
+  const [user, setUser] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const isReadyRef = useRef(false);
 
   useEffect(() => {
+    // Safety timeout to ensure the app shows something even if Supabase hangs
+    const safetyTimeout = setTimeout(() => {
+      if (!isReadyRef.current) {
+        console.warn('Auth initialization taking too long, forcing ready state');
+        setIsAuthReady(true);
+        isReadyRef.current = true;
+      }
+    }, 5000);
+
+    const initAuth = async () => {
+      try {
+        // 1. Tentar recuperar usuário do localStorage com segurança
+        const stored = localStorage.getItem('nsf_user');
+        if (stored) {
+          try {
+            setUser(JSON.parse(stored));
+          } catch (e) {
+            localStorage.removeItem('nsf_user');
+          }
+        }
+
+        // 2. Verificar sessão atual no Supabase
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        if (sessionError) {
+          console.error('Erro ao buscar sessão:', sessionError);
+          setIsAuthReady(true);
+          isReadyRef.current = true;
+          return;
+        }
+
+        if (session?.user) {
+          const { data: profile, error: profileError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
+          
+          if (!profileError && profile) {
+            setUser(profile);
+            localStorage.setItem('nsf_user', JSON.stringify(profile));
+          } else {
+            const fallbackUser = {
+              id: session.user.id,
+              name: session.user.user_metadata?.name || session.user.email?.split('@')[0] || 'Usuário',
+              email: session.user.email,
+              role: session.user.user_metadata?.role || 'user'
+            };
+            setUser(fallbackUser);
+            localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
+          }
+        } else {
+          // Sem sessão ativa
+          setUser(null);
+          localStorage.removeItem('nsf_user');
+        }
+      } catch (error) {
+        console.error('Erro na inicialização da auth:', error);
+      } finally {
+        setIsAuthReady(true);
+        isReadyRef.current = true;
+        clearTimeout(safetyTimeout);
+      }
+    };
+
+    initAuth();
+
+    // 3. Monitorar mudanças de estado
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('Auth State Change:', event, session?.user?.id);
+      
       if (session?.user) {
-        // Buscar dados extras do perfil na tabela pública
         const { data: profile } = await supabase
           .from('users')
           .select('*')
           .eq('id', session.user.id)
           .single();
         
-        if (profile) {
-          setUser(profile);
-          localStorage.setItem('nsf_user', JSON.stringify(profile));
-          // Só redireciona se estiver na tela de login ou se acabou de entrar
-          if (event === 'SIGNED_IN') {
-            setView('form');
-          }
-        } else {
-          // Se não encontrar o perfil na tabela pública, cria um temporário com os dados do Auth
-          const fallbackUser = {
-            id: session.user.id,
-            name: session.user.user_metadata?.name || 'Usuário',
-            email: session.user.email,
-            role: session.user.user_metadata?.role || 'user'
-          };
-          setUser(fallbackUser);
-          localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
-          if (event === 'SIGNED_IN') {
-            setView('form');
-          }
+        const userData = profile || {
+          id: session.user.id,
+          name: session.user.user_metadata?.name || session.user.email?.split('@')[0] || 'Usuário',
+          email: session.user.email,
+          role: session.user.user_metadata?.role || 'user'
+        };
+
+        setUser(userData);
+        localStorage.setItem('nsf_user', JSON.stringify(userData));
+        
+        if (event === 'SIGNED_IN') {
+          setView(userData.role === 'admin' ? 'report' : 'form');
         }
       } else {
         setUser(null);
         localStorage.removeItem('nsf_user');
+        if (event === 'SIGNED_OUT') {
+          setView('form');
+        }
       }
       setIsAuthReady(true);
+      isReadyRef.current = true;
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(safetyTimeout);
+    };
   }, []);
 
   const handleEdit = (order: Order) => {
