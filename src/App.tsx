@@ -192,7 +192,7 @@ export const generateOrderPDF = (order: Order) => {
   return doc;
 };
 
-export const sendWhatsApp = (order: Order) => {
+export const getWhatsAppUrl = (order: Order) => {
   const text = `*Camisas Festa de Nossa Senhora de Fátima 2026*
   
 *Pedido:* ${order.orderNumber}
@@ -218,7 +218,11 @@ Ao fazer o pagamento, enviar o comprovante neste mesmo WhatsApp.
 _Deus abençoe!_`;
 
   const encodedText = encodeURIComponent(text);
-  window.open(`https://wa.me/5573988030447?text=${encodedText}`, '_blank');
+  return `https://wa.me/5573988030447?text=${encodedText}`;
+};
+
+export const sendWhatsApp = (order: Order) => {
+  window.open(getWhatsAppUrl(order), '_blank');
 };
 
 function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) => void, initialOrder?: Order | null, user?: any }) {
@@ -349,16 +353,16 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
           });
 
           try {
-            await fetch(sheetsUrl, {
+            fetch(sheetsUrl, {
               method: 'POST',
               mode: 'no-cors',
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
               },
               body: formData.toString()
-            });
+            }).catch(err => console.error('Erro ao enviar para o Google Sheets:', err));
           } catch (err) {
-            console.error('Erro ao enviar para o Google Sheets:', err);
+            console.error('Erro ao iniciar envio para o Google Sheets:', err);
           }
         }
         // --------------------------------
@@ -367,16 +371,17 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
         const pdfDataUri = doc.output('datauristring');
         
         try {
-          await fetch('/api/send-order-email', {
+          fetch('/api/send-order-email', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ order: newOrder, pdfDataUri })
-          });
+          }).catch(err => console.error('Erro ao enviar email:', err));
         } catch (err) {
-          console.error('Erro ao enviar email:', err);
+          console.error('Erro ao iniciar envio de email:', err);
         }
         
-        sendWhatsApp(newOrder);
+        // Removido o sendWhatsApp automático para evitar bloqueio de pop-up pelo navegador.
+        // O usuário deve clicar no botão na tela de sucesso.
       }
 
       setIsSubmitting(false);
@@ -618,9 +623,9 @@ function SuccessView({ order, onNewOrder }: { order: Order, onNewOrder: () => vo
       </div>
 
       <div className="flex flex-col gap-3 mt-6">
-        <button onClick={() => sendWhatsApp(order)} className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors">
+        <a href={getWhatsAppUrl(order)} target="_blank" rel="noopener noreferrer" className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors">
           <Send size={20} /> Enviar para WhatsApp
-        </button>
+        </a>
         <button onClick={() => generateOrderPDF(order).save(`Pedido_${order.orderNumber}.pdf`)} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors">
           <Download size={20} /> Baixar PDF do Pedido
         </button>
@@ -1277,9 +1282,41 @@ export default function App() {
             const userData = { id: userDoc.id, ...userDoc.data() };
             setUser(userData);
             localStorage.setItem('nsf_user', JSON.stringify(userData));
+          } else {
+            // Documento não existe, mas o usuário está autenticado
+            const fallbackUser = { 
+              id: authUser.uid, 
+              email: authUser.email, 
+              name: authUser.displayName || authUser.email || 'Usuário',
+              role: authUser.email?.toLowerCase() === 'ejanerik@gmail.com' ? 'admin' : 'user' 
+            };
+            setUser(fallbackUser);
+            localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
+            
+            // Tenta recriar o admin se for o email principal
+            if (fallbackUser.role === 'admin') {
+              try {
+                await setDoc(doc(db, 'users', authUser.uid), {
+                  name: 'Administrador Geral',
+                  email: fallbackUser.email,
+                  role: 'admin'
+                });
+              } catch (e) {
+                console.error('Erro ao recriar admin:', e);
+              }
+            }
           }
         } catch (error) {
           console.error('Erro ao buscar dados do usuário:', error);
+          // Fallback em caso de erro de permissão
+          const fallbackUser = { 
+            id: authUser.uid, 
+            email: authUser.email, 
+            name: authUser.displayName || authUser.email || 'Usuário',
+            role: authUser.email?.toLowerCase() === 'ejanerik@gmail.com' ? 'admin' : 'user' 
+          };
+          setUser(fallbackUser);
+          localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
         }
       } else {
         setUser(null);
