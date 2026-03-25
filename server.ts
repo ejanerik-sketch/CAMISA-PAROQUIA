@@ -3,6 +3,7 @@ import cors from 'cors';
 import nodemailer from 'nodemailer';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 app.use(cors());
@@ -10,8 +11,133 @@ app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://gjyqiaeuumnflzeftwgb.supabase.co";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Initialize Supabase Admin Client
+const supabaseAdmin = SUPABASE_SERVICE_ROLE_KEY 
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    })
+  : null;
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Admin: Create User
+app.post('/api/admin/create-user', async (req, res) => {
+  const { name, email, password, role } = req.body;
+  const authHeader = req.headers.authorization;
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Supabase Admin Client not configured. Please set SUPABASE_SERVICE_ROLE_KEY.' });
+  }
+
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // Verify the admin's token
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user: adminUser }, error: adminError } = await supabaseAdmin.auth.getUser(token);
+
+    if (adminError || !adminUser) {
+      return res.status(401).json({ error: 'Invalid admin session' });
+    }
+
+    // Check if the user is an admin in the public users table
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('users')
+      .select('role')
+      .eq('id', adminUser.id)
+      .single();
+
+    if (profileError || profile?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can create users' });
+    }
+
+    // Create user in Auth
+    const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
+      email: email.toLowerCase(),
+      password: password,
+      email_confirm: true,
+      user_metadata: { name, role }
+    });
+
+    if (createError) throw createError;
+
+    // Insert into public users table (if trigger doesn't exist or to be sure)
+    const { error: insertError } = await supabaseAdmin
+      .from('users')
+      .upsert({
+        id: newUser.user.id,
+        name,
+        email: email.toLowerCase(),
+        role
+      });
+
+    if (insertError) throw insertError;
+
+    res.json({ success: true, user: newUser.user });
+  } catch (error: any) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ error: error.message || 'Failed to create user' });
+  }
+});
+
+// Admin: Delete User
+app.delete('/api/admin/delete-user/:id', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Supabase Admin Client not configured.' });
+  }
+
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user: adminUser }, error: adminError } = await supabaseAdmin.auth.getUser(token);
+
+    if (adminError || !adminUser) {
+      return res.status(401).json({ error: 'Invalid admin session' });
+    }
+
+    const { data: profile } = await supabaseAdmin
+      .from('users')
+      .select('role')
+      .eq('id', adminUser.id)
+      .single();
+
+    if (profile?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can delete users' });
+    }
+
+    // Delete from Auth
+    const { error: deleteAuthError } = await supabaseAdmin.auth.admin.deleteUser(id);
+    if (deleteAuthError) throw deleteAuthError;
+
+    // Delete from public table
+    const { error: deleteTableError } = await supabaseAdmin
+      .from('users')
+      .delete()
+      .eq('id', id);
+    
+    if (deleteTableError) throw deleteTableError;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete user' });
+  }
 });
 
 app.post('/api/send-welcome-email', async (req, res) => {

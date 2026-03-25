@@ -3,25 +3,7 @@ import { ShoppingCart, User, CheckCircle, Plus, Minus, ArrowLeft, FileText, MapP
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-
-const getLocalOrders = (): Order[] => JSON.parse(localStorage.getItem('nsf_orders') || '[]');
-const setLocalOrders = (orders: Order[]) => localStorage.setItem('nsf_orders', JSON.stringify(orders));
-
-const getLocalUsers = () => JSON.parse(localStorage.getItem('nsf_users') || '[]');
-const setLocalUsers = (users: any[]) => localStorage.setItem('nsf_users', JSON.stringify(users));
-
-const initUsers = () => {
-  let users = getLocalUsers();
-  const adminIndex = users.findIndex((u: any) => u.email === 'ejanerik@gmail.com');
-  if (adminIndex === -1) {
-    users.push({ id: 'admin-1', name: 'Jan Erik', email: 'ejanerik@gmail.com', role: 'admin', password: 'admin' });
-    setLocalUsers(users);
-  } else if (users[adminIndex].name === 'Administrador Geral') {
-    users[adminIndex].name = 'Jan Erik';
-    setLocalUsers(users);
-  }
-};
-initUsers();
+import { supabase } from './supabaseClient';
 
 const SIZES = [
   { id: 'PP_BABY', name: 'PP BABY', price: 40 },
@@ -94,28 +76,110 @@ interface Order {
 }
 
 const getOrders = async (user: any): Promise<Order[]> => {
-  const orders = getLocalOrders();
-  if (user?.role === 'admin' || user?.role === 'user') {
-    return orders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  if (!user) return [];
+  
+  const { data, error } = await supabase
+    .from('orders')
+    .select(`
+      *,
+      order_items (*)
+    `)
+    .order('date', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching orders:', error);
+    return [];
   }
-  return [];
+
+  return data.map((o: any) => ({
+    id: o.id,
+    orderNumber: o.order_number,
+    date: o.date,
+    customer: {
+      name: o.customer_name,
+      whatsapp: o.customer_whatsapp,
+      address: o.customer_address,
+      group: o.customer_group
+    },
+    items: o.order_items.map((i: any) => ({
+      sizeId: i.size_id,
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price
+    })),
+    total: o.total,
+    createdBy: {
+      id: o.created_by_id,
+      name: o.created_by_name
+    },
+    origin: o.origin
+  }));
 };
 
 const saveOrder = async (order: Order, isEdit: boolean = false) => {
-  const orders = getLocalOrders();
+  const orderData = {
+    id: order.id,
+    order_number: order.orderNumber,
+    date: order.date,
+    customer_name: order.customer.name,
+    customer_whatsapp: order.customer.whatsapp,
+    customer_address: order.customer.address,
+    customer_group: order.customer.group,
+    total: order.total,
+    created_by_id: order.createdBy?.id,
+    created_by_name: order.createdBy?.name,
+    origin: order.origin
+  };
+
   if (isEdit) {
-    const index = orders.findIndex(o => o.id === order.id);
-    if (index !== -1) orders[index] = order;
+    const { error: orderError } = await supabase
+      .from('orders')
+      .update(orderData)
+      .eq('id', order.id);
+
+    if (orderError) throw orderError;
+
+    // Delete existing items and re-insert
+    const { error: deleteError } = await supabase
+      .from('order_items')
+      .delete()
+      .eq('order_id', order.id);
+
+    if (deleteError) throw deleteError;
   } else {
-    orders.push(order);
+    const { error: orderError } = await supabase
+      .from('orders')
+      .insert(orderData);
+
+    if (orderError) throw orderError;
   }
-  setLocalOrders(orders);
+
+  const itemsData = order.items.map(item => ({
+    order_id: order.id,
+    size_id: item.sizeId,
+    name: item.name,
+    quantity: item.quantity,
+    price: item.price
+  }));
+
+  const { error: itemsError } = await supabase
+    .from('order_items')
+    .insert(itemsData);
+
+  if (itemsError) throw itemsError;
 };
 
 const generateOrderNumber = async () => {
-  const orders = getLocalOrders();
-  const count = orders.length;
-  const nextNum = count + 1;
+  const { count, error } = await supabase
+    .from('orders')
+    .select('*', { count: 'exact', head: true });
+
+  if (error) {
+    console.error('Error counting orders:', error);
+    return `NSF26-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+  }
+
+  const nextNum = (count || 0) + 1;
   return `NSF26-${nextNum.toString().padStart(4, '0')}`;
 };
 
@@ -234,14 +298,13 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
 
     if (!initialOrder && !showDuplicateWarning) {
       try {
-        const existingOrders = getLocalOrders();
+        const { data: existingOrders } = await supabase
+          .from('orders')
+          .select('customer_name, customer_whatsapp')
+          .ilike('customer_name', formData.name.trim())
+          .eq('customer_whatsapp', formData.whatsapp.replace(/\D/g, ''));
         
-        const isDuplicate = existingOrders.some((o: any) => 
-          o.customer?.name?.toLowerCase().trim() === formData.name.toLowerCase().trim() && 
-          o.customer?.whatsapp?.replace(/\D/g, '') === formData.whatsapp.replace(/\D/g, '')
-        );
-        
-        if (isDuplicate) {
+        if (existingOrders && existingOrders.length > 0) {
           setShowDuplicateWarning(true);
           return;
         }
@@ -269,74 +332,11 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
       items: orderItems,
       total: totalPrice,
       createdBy: initialOrder ? initialOrder.createdBy : (user ? { id: user.id, name: user.name } : undefined),
-      origin: initialOrder ? (initialOrder.origin || (initialOrder.createdBy ? `Equipe: ${initialOrder.createdBy.name}` : "Direto do Fiel (Site)")) : (user ? `Equipe: ${user.name}` : "Direto do Fiel (Site)")
+      origin: initialOrder ? (initialOrder.origin || (initialOrder.createdBy ? initialOrder.createdBy.name : "Direto do Fiel (Site)")) : (user ? user.name : "Direto do Fiel (Site)")
     };
 
     try {
       await saveOrder(newOrder, !!initialOrder);
-
-      if (!initialOrder) {
-        // --- INTEGRAÇÃO GOOGLE SHEETS ---
-        const sheetsUrl = (import.meta as any).env.VITE_GOOGLE_SHEETS_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbzD409OB_SVIAGwiJreL5Ca8YsHgzWFNTqV10bJXa17fVqU2xOTHQN_RAVpwu7C_y8bHA/exec";
-        if (sheetsUrl) {
-          const individualShirts: string[] = [];
-          newOrder.items.forEach(item => {
-            for (let i = 0; i < item.quantity; i++) {
-              individualShirts.push(item.name);
-            }
-          });
-
-          const sheetsPayload = {
-            orderNumber: newOrder.orderNumber,
-            date: new Date(newOrder.date).toLocaleString('pt-BR'),
-            whatsapp: newOrder.customer.whatsapp,
-            name: newOrder.customer.name,
-            camisa1: individualShirts[0] || "",
-            camisa2: individualShirts[1] || "",
-            camisa3: individualShirts[2] || "",
-            camisa4: individualShirts[3] || "",
-            camisa5: individualShirts[4] || "",
-            camisa6: individualShirts[5] || "",
-            paymentMethod: "PIX",
-            sellerName: newOrder.createdBy?.name || "Site"
-          };
-
-          const formData = new URLSearchParams();
-          Object.entries(sheetsPayload).forEach(([key, value]) => {
-            formData.append(key, value as string);
-          });
-
-          try {
-            fetch(sheetsUrl, {
-              method: 'POST',
-              mode: 'no-cors',
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              body: formData.toString()
-            }).catch(err => console.error('Erro ao enviar para o Google Sheets:', err));
-          } catch (err) {
-            console.error('Erro ao iniciar envio para o Google Sheets:', err);
-          }
-        }
-        // --------------------------------
-
-        const doc = generateOrderPDF(newOrder);
-        const pdfDataUri = doc.output('datauristring');
-        
-        try {
-          fetch('/api/send-order-email', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ order: newOrder, pdfDataUri })
-          }).catch(err => console.error('Erro ao enviar email:', err));
-        } catch (err) {
-          console.error('Erro ao iniciar envio de email:', err);
-        }
-        
-        // Removido o sendWhatsApp automático para evitar bloqueio de pop-up pelo navegador.
-        // O usuário deve clicar no botão na tela de sucesso.
-      }
 
       setIsSubmitting(false);
       onSubmit(newOrder);
@@ -591,9 +591,11 @@ function SuccessView({ order, onNewOrder }: { order: Order, onNewOrder: () => vo
   );
 }
 
-function LoginView({ onLogin, onBack }: { onLogin: (user: any) => void, onBack: () => void }) {
+function LoginView({ onBack }: { onBack: () => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -602,21 +604,47 @@ function LoginView({ onLogin, onBack }: { onLogin: (user: any) => void, onBack: 
     setLoading(true);
     setError('');
 
-    setTimeout(() => {
-      const users = getLocalUsers();
-      const foundUser = users.find((u: any) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
-      
-      if (foundUser) {
-        const { password, ...userWithoutPass } = foundUser;
-        onLogin(userWithoutPass);
-      } else if (email.toLowerCase() === 'ejanerik@gmail.com') {
-        const newAdmin = { id: 'admin-1', name: 'Jan Erik', email: email.toLowerCase(), role: 'admin' };
-        onLogin(newAdmin);
+    try {
+      if (mode === 'login') {
+        const { error: authError } = await supabase.auth.signInWithPassword({
+          email: email.toLowerCase(),
+          password: password,
+        });
+
+        if (authError) {
+          if (authError.message === 'Invalid login credentials') {
+            setError('E-mail ou senha incorretos.');
+          } else {
+            setError(`Erro no login: ${authError.message}`);
+          }
+          return;
+        }
       } else {
-        setError('E-mail ou senha incorretos');
+        const { error: authError } = await supabase.auth.signUp({
+          email: email.toLowerCase(),
+          password: password,
+          options: {
+            data: { name, role: 'user' }
+          }
+        });
+
+        if (authError) {
+          setError(`Erro no registo: ${authError.message}`);
+          return;
+        }
+        alert('Registo realizado com sucesso! Verifique o seu e-mail se necessário.');
+        setMode('login');
       }
+    } catch (err: any) {
+      setError('Erro ao processar a solicitação. Tente novamente.');
+    } finally {
       setLoading(false);
-    }, 500);
+    }
+  };
+
+  const fillAdmin = () => {
+    setEmail('ejanerik@gmail.com');
+    setPassword('camisas2026');
   };
 
   return (
@@ -626,25 +654,58 @@ function LoginView({ onLogin, onBack }: { onLogin: (user: any) => void, onBack: 
           <ArrowLeft size={20} />
         </button>
         <h2 className="text-2xl font-bold text-blue-900 flex items-center gap-2">
-          <Lock size={24} className="text-amber-500" /> Acesso Restrito
+          <Lock size={24} className="text-amber-500" /> {mode === 'login' ? 'Acesso Restrito' : 'Criar Conta'}
         </h2>
       </div>
       
-      {error && <div className="bg-red-50 text-red-600 p-3 rounded-xl mb-6 text-sm border border-red-100">{error}</div>}
-
       <form onSubmit={handleSubmit} className="space-y-4">
+        {mode === 'signup' && (
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Nome Completo</label>
+            <input required type="text" value={name} onChange={e => setName(e.target.value)} className="w-full p-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Seu nome" />
+          </div>
+        )}
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
-          <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full p-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="admin@paroquia.com" />
+          <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full p-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="exemplo@email.com" />
         </div>
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
           <input required type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full p-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="••••••••" />
         </div>
-        <button disabled={loading} type="submit" className="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 px-4 rounded-xl transition-colors mt-4 disabled:opacity-70">
-          {loading ? 'Entrando...' : 'Entrar'}
+        
+        <button disabled={loading} type="submit" className={`w-full text-white font-bold py-3 px-4 rounded-xl transition-colors mt-4 ${loading ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-900 hover:bg-blue-800'}`}>
+          {loading ? 'Processando...' : (mode === 'login' ? 'Entrar' : 'Registar')}
         </button>
+
+        <div className="text-center mt-6 space-y-4">
+          <button 
+            type="button" 
+            onClick={() => setMode(mode === 'login' ? 'signup' : 'login')}
+            className="text-sm text-blue-600 hover:underline font-medium"
+          >
+            {mode === 'login' ? 'Não tem conta? Registe-se aqui' : 'Já tem conta? Faça login'}
+          </button>
+
+          {mode === 'login' && (
+            <div className="pt-4 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={fillAdmin}
+                className="text-xs text-slate-400 hover:text-amber-600 transition-colors flex items-center justify-center gap-1 mx-auto"
+              >
+                <Lock size={12} /> Usar Acesso de Administrador
+              </button>
+            </div>
+          )}
+        </div>
       </form>
+
+      {error && (
+        <div className="bg-red-50 text-red-600 p-3 rounded-xl mt-6 text-sm border border-red-100 flex items-center gap-2">
+          <AlertCircle size={16} /> {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -657,11 +718,12 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
 
   const fetchUsers = async () => {
     try {
-      const usersList = getLocalUsers().map((u: any) => {
-        const { password, ...rest } = u;
-        return rest;
-      });
-      setUsers(usersList);
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, name, email, role');
+      
+      if (error) throw error;
+      setUsers(data || []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -676,21 +738,19 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const users = getLocalUsers();
-      if (users.find((u: any) => u.email === formData.email)) {
-        alert('E-mail já cadastrado!');
-        return;
-      }
+      const { data: { session } } = await supabase.auth.getSession();
       
-      users.push({
-        id: crypto.randomUUID(),
-        name: formData.name,
-        email: formData.email,
-        password: formData.password,
-        role: formData.role
+      const response = await fetch('/api/admin/create-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`
+        },
+        body: JSON.stringify(formData)
       });
-      
-      setLocalUsers(users);
+
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Erro ao criar usuário');
 
       setShowForm(false);
       setFormData({ name: '', email: '', password: '', role: 'user' });
@@ -702,10 +762,24 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
   };
 
   const handleDelete = async (id: string) => {
+    if (id === user.id) {
+      alert('Você não pode excluir a si mesmo!');
+      return;
+    }
     if (!confirm('Tem certeza que deseja excluir este usuário?')) return;
     try {
-      const users = getLocalUsers();
-      setLocalUsers(users.filter((u: any) => u.id !== id));
+      const { data: { session } } = await supabase.auth.getSession();
+
+      const response = await fetch(`/api/admin/delete-user/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${session?.access_token}`
+        }
+      });
+
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Erro ao excluir usuário');
+      
       fetchUsers();
     } catch (err: any) {
       alert('Erro ao excluir usuário: ' + err.message);
@@ -800,6 +874,7 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
   const [filterEndDate, setFilterEndDate] = useState('');
   const [filterUser, setFilterUser] = useState('all');
   const [orderToDelete, setOrderToDelete] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
 
   useEffect(() => {
     const loadOrders = async () => {
@@ -809,7 +884,7 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
     loadOrders();
   }, [user]);
 
-  const uniqueOrigins = Array.from(new Set(orders.map(o => o.origin).filter(o => o && o.startsWith('Equipe:'))));
+  const uniqueOrigins = Array.from(new Set(orders.map(o => o.origin).filter(o => o && o !== 'Direto do Fiel (Site)')));
 
   const filteredOrders = orders.filter(o => {
     const matchName = o.customer.name.toLowerCase().includes(filterName.toLowerCase());
@@ -827,7 +902,7 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
     if (filterUser === 'direct') {
       matchUser = o.origin === 'Direto do Fiel (Site)';
     } else if (filterUser === 'internal') {
-      matchUser = o.origin && o.origin.startsWith('Equipe:');
+      matchUser = o.origin !== 'Direto do Fiel (Site)';
     } else if (filterUser !== 'all') {
       matchUser = o.origin === filterUser;
     }
@@ -896,6 +971,32 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
     yPos = (doc as any).lastAutoTable.finalY + 15;
 
     doc.setFontSize(14);
+    doc.text('Grade Detalhada por Pedido:', 14, yPos);
+    yPos += 8;
+
+    // Cabeçalho da grade (Pedido + Tamanhos)
+    const gridHead = [['Pedido', ...SIZES.map(s => s.name.replace(' BABY', 'B').replace(' TRAD', 'T')), 'Total']];
+    const gridBody = filteredOrders.map(order => {
+      const row = [order.orderNumber];
+      SIZES.forEach(size => {
+        const item = order.items.find(i => i.sizeId === size.id);
+        row.push(item ? item.quantity.toString() : '-');
+      });
+      row.push(order.items.reduce((acc, i) => acc + i.quantity, 0).toString());
+      return row;
+    });
+
+    autoTable(doc, {
+      startY: yPos,
+      head: gridHead,
+      body: gridBody,
+      styles: { fontSize: 7, cellPadding: 1 },
+      headStyles: { fillColor: [15, 23, 42] }
+    });
+
+    yPos = (doc as any).lastAutoTable.finalY + 15;
+
+    doc.setFontSize(14);
     doc.text('Lista de Pedidos:', 14, yPos);
     yPos += 8;
 
@@ -919,8 +1020,13 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
 
   const confirmDelete = async (id: string) => {
     try {
-      const existingOrders = getLocalOrders();
-      setLocalOrders(existingOrders.filter((o: any) => o.id !== id));
+      const { error } = await supabase
+        .from('orders')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+      
       setOrders(orders.filter(o => o.id !== id));
       setOrderToDelete(null);
     } catch (err: any) {
@@ -1058,70 +1164,140 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
-              <tr>
-                <th className="p-4 font-semibold">Pedido</th>
-                <th className="p-4 font-semibold">Data/Hora</th>
-                <th className="p-4 font-semibold">Cliente</th>
-                <th className="p-4 font-semibold">Itens</th>
-                <th className="p-4 font-semibold">Total</th>
-                <th className="p-4 font-semibold">Ações</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredOrders.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="p-8 text-center text-slate-500">Nenhum pedido encontrado.</td>
-                </tr>
-              ) : (
-                filteredOrders.map(order => (
-                  <tr key={order.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="p-4 font-bold text-blue-900">{order.orderNumber}</td>
-                    <td className="p-4 text-slate-600">
-                      {new Date(order.date).toLocaleDateString('pt-BR')} <br/>
-                      <span className="text-xs text-slate-400">{new Date(order.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
-                    </td>
-                    <td className="p-4">
-                      <p className="font-medium text-slate-800">{order.customer.name}</p>
-                      <p className="text-xs text-slate-500">{order.customer.whatsapp}</p>
-                      <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-bold rounded-md ${order.origin === 'Direto do Fiel (Site)' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>
-                        {order.origin}
-                      </span>
-                    </td>
-                    <td className="p-4 text-slate-600 whitespace-normal min-w-[200px]">
-                      <ul className="list-disc list-inside text-xs space-y-1">
-                        {order.items.map((item, idx) => (
-                          <li key={idx}><span className="font-semibold">{item.quantity}x</span> {item.name}</li>
-                        ))}
-                      </ul>
-                    </td>
-                    <td className="p-4 font-bold text-slate-800">R$ {order.total.toFixed(2)}</td>
-                    <td className="p-4">
-                      <div className="flex gap-2">
-                        {user?.role === 'admin' || (order.createdBy && order.createdBy.id === user?.id) ? (
-                          <button onClick={() => onEdit(order)} className="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-100 transition-colors" title="Editar Pedido">
-                            <Edit2 size={18} />
-                          </button>
-                        ) : null}
-                        
-                        {user?.role === 'admin' ? (
-                          <button onClick={() => setOrderToDelete(order.id)} className="text-red-600 hover:text-red-800 p-2 rounded-lg hover:bg-red-100 transition-colors" title="Apagar Pedido">
-                            <Trash2 size={18} />
-                          </button>
-                        ) : null}
+        <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-50/50">
+          <h3 className="font-bold text-slate-800">Listagem de Pedidos</h3>
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Visualização:</span>
+            <div className="flex bg-white border border-slate-200 rounded-lg p-1">
+              <button 
+                onClick={() => setViewMode('list')}
+                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${viewMode === 'list' ? 'bg-blue-900 text-white shadow-sm' : 'text-slate-500 hover:text-blue-600'}`}
+              >
+                Lista
+              </button>
+              <button 
+                onClick={() => setViewMode('grid')}
+                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${viewMode === 'grid' ? 'bg-blue-900 text-white shadow-sm' : 'text-slate-500 hover:text-blue-600'}`}
+              >
+                Grade de Tamanhos
+              </button>
+            </div>
+          </div>
+        </div>
 
-                        {user?.role !== 'admin' && !(order.createdBy && order.createdBy.id === user?.id) && (
-                          <span className="text-slate-400 text-xs italic">Sem permissão</span>
-                        )}
-                      </div>
+        <div className="overflow-x-auto">
+          {viewMode === 'list' ? (
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                <tr>
+                  <th className="p-4 font-semibold">Pedido</th>
+                  <th className="p-4 font-semibold">Data/Hora</th>
+                  <th className="p-4 font-semibold">Cliente</th>
+                  <th className="p-4 font-semibold">Itens</th>
+                  <th className="p-4 font-semibold">Total</th>
+                  <th className="p-4 font-semibold">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="p-8 text-center text-slate-500">Nenhum pedido encontrado.</td>
+                  </tr>
+                ) : (
+                  filteredOrders.map(order => (
+                    <tr key={order.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="p-4 font-bold text-blue-900">{order.orderNumber}</td>
+                      <td className="p-4 text-slate-600">
+                        {new Date(order.date).toLocaleDateString('pt-BR')} <br/>
+                        <span className="text-xs text-slate-400">{new Date(order.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                      </td>
+                      <td className="p-4">
+                        <p className="font-medium text-slate-800">{order.customer.name}</p>
+                        <p className="text-xs text-slate-500">{order.customer.whatsapp}</p>
+                        <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-bold rounded-md ${order.origin === 'Direto do Fiel (Site)' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>
+                          {order.origin}
+                        </span>
+                      </td>
+                      <td className="p-4 text-slate-600 whitespace-normal min-w-[200px]">
+                        <ul className="list-disc list-inside text-xs space-y-1">
+                          {order.items.map((item, idx) => (
+                            <li key={idx}><span className="font-semibold">{item.quantity}x</span> {item.name}</li>
+                          ))}
+                        </ul>
+                      </td>
+                      <td className="p-4 font-bold text-slate-800">R$ {order.total.toFixed(2)}</td>
+                      <td className="p-4">
+                        <div className="flex gap-2">
+                          {user?.role === 'admin' || (order.createdBy && order.createdBy.id === user?.id) ? (
+                            <button onClick={() => onEdit(order)} className="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-100 transition-colors" title="Editar Pedido">
+                              <Edit2 size={18} />
+                            </button>
+                          ) : null}
+                          
+                          {user?.role === 'admin' ? (
+                            <button onClick={() => setOrderToDelete(order.id)} className="text-red-600 hover:text-red-800 p-2 rounded-lg hover:bg-red-100 transition-colors" title="Apagar Pedido">
+                              <Trash2 size={18} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <table className="w-full text-left text-[10px] whitespace-nowrap border-collapse">
+              <thead className="bg-slate-800 text-white sticky top-0 z-10">
+                <tr>
+                  <th className="p-2 font-bold border-r border-slate-700 sticky left-0 bg-slate-800">Pedido/Cliente</th>
+                  {SIZES.map(size => (
+                    <th key={size.id} className="p-2 font-bold text-center border-r border-slate-700 min-w-[40px]">{size.name.replace(' BABY', 'B').replace(' TRAD', 'T')}</th>
+                  ))}
+                  <th className="p-2 font-bold text-center bg-amber-600">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {filteredOrders.map(order => (
+                  <tr key={order.id} className="hover:bg-blue-50 transition-colors">
+                    <td className="p-2 border-r border-slate-200 sticky left-0 bg-white z-10 group-hover:bg-blue-50">
+                      <div className="font-bold text-blue-900">{order.orderNumber}</div>
+                      <div className="text-slate-500 truncate max-w-[120px]">{order.customer.name}</div>
+                    </td>
+                    {SIZES.map(size => {
+                      const item = order.items.find(i => i.sizeId === size.id);
+                      return (
+                        <td key={size.id} className={`p-2 text-center border-r border-slate-100 font-bold ${item ? 'bg-blue-50 text-blue-700' : 'text-slate-300'}`}>
+                          {item ? item.quantity : '-'}
+                        </td>
+                      );
+                    })}
+                    <td className="p-2 text-center font-bold bg-amber-50 text-amber-700">
+                      {order.items.reduce((acc, i) => acc + i.quantity, 0)}
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ))}
+                {/* Linha de Totais */}
+                <tr className="bg-slate-100 font-bold">
+                  <td className="p-2 sticky left-0 bg-slate-100 z-10">TOTAL GERAL</td>
+                  {SIZES.map(size => {
+                    const totalForSize = filteredOrders.reduce((acc, order) => {
+                      const item = order.items.find(i => i.sizeId === size.id);
+                      return acc + (item ? item.quantity : 0);
+                    }, 0);
+                    return (
+                      <td key={size.id} className="p-2 text-center border-r border-slate-200 text-blue-900">
+                        {totalForSize || '-'}
+                      </td>
+                    );
+                  })}
+                  <td className="p-2 text-center bg-amber-200 text-amber-900">
+                    {filteredOrders.reduce((acc, order) => acc + order.items.reduce((sum, i) => sum + i.quantity, 0), 0)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>
@@ -1201,35 +1377,61 @@ export default function App() {
   const [currentOrder, setCurrentOrder] = useState<Order | null>(null);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   
-  const [token, setToken] = useState<string | null>(localStorage.getItem('nsf_token'));
   const [user, setUser] = useState<any>(JSON.parse(localStorage.getItem('nsf_user') || 'null'));
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   useEffect(() => {
-    const storedUser = localStorage.getItem('nsf_user');
-    if (storedUser) {
-      let userData = JSON.parse(storedUser);
-      if (userData.email === 'ejanerik@gmail.com' && userData.name === 'Administrador Geral') {
-        userData.name = 'Jan Erik';
-        localStorage.setItem('nsf_user', JSON.stringify(userData));
-      }
-      setUser(userData);
-    }
-    setIsAuthReady(true);
-  }, []);
+    const initApp = async () => {
+      // Monitorar estado da autenticação oficial
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (session?.user) {
+          // Buscar dados extras do perfil na tabela pública
+          const { data: profile, error: profileError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
+          
+          if (profile) {
+            setUser(profile);
+            localStorage.setItem('nsf_user', JSON.stringify(profile));
+            if (event === 'SIGNED_IN' || view === 'login') {
+              setView('form');
+            }
+          } else {
+            // Se não encontrar o perfil na tabela pública, cria um temporário com os dados do Auth
+            const fallbackUser = {
+              id: session.user.id,
+              name: session.user.user_metadata?.name || 'Usuário',
+              email: session.user.email,
+              role: session.user.user_metadata?.role || 'user'
+            };
+            setUser(fallbackUser);
+            localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
+            if (event === 'SIGNED_IN' || view === 'login') {
+              setView('form');
+            }
+          }
+        } else {
+          setUser(null);
+          localStorage.removeItem('nsf_user');
+        }
+        setIsAuthReady(true);
+      });
+
+      return () => subscription.unsubscribe();
+    };
+
+    initApp();
+  }, [view]);
 
   const handleEdit = (order: Order) => {
     setEditingOrder(order);
     setView('form');
   };
 
-  const handleLogin = (newUser: any) => {
-    setUser(newUser);
-    localStorage.setItem('nsf_user', JSON.stringify(newUser));
-    setView('report');
-  };
-
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     setUser(null);
     localStorage.removeItem('nsf_user');
     setView('form');
@@ -1243,6 +1445,14 @@ export default function App() {
       setView('login');
     }
   };
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-900"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -1345,7 +1555,7 @@ export default function App() {
       <main className="max-w-4xl mx-auto px-4 py-8">
         {view === 'form' && <OrderForm initialOrder={editingOrder} user={user} onSubmit={(order) => { setCurrentOrder(order); setEditingOrder(null); setView('success'); }} />}
         {view === 'success' && currentOrder && <SuccessView order={currentOrder} onNewOrder={() => { setCurrentOrder(null); setEditingOrder(null); setView('form'); }} />}
-        {view === 'login' && <LoginView onLogin={handleLogin} onBack={() => setView('form')} />}
+        {view === 'login' && <LoginView onBack={() => setView('form')} />}
         {view === 'report' && <ReportView onBack={() => { setEditingOrder(null); setView('form'); }} onEdit={handleEdit} user={user} onManageUsers={() => setView('users')} />}
         {view === 'users' && user && <UsersView user={user} onBack={() => setView('report')} />}
       </main>
