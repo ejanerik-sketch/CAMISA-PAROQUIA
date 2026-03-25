@@ -19,7 +19,6 @@
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^4.22.1",
-    "firebase": "^12.11.0",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",

@@ -3,9 +3,21 @@ import { ShoppingCart, User, CheckCircle, Plus, Minus, ArrowLeft, FileText, MapP
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { db, auth, secondaryAuth } from './firebase';
-import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, getDoc, limit, onSnapshot, where } from 'firebase/firestore';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+
+const getLocalOrders = (): Order[] => JSON.parse(localStorage.getItem('nsf_orders') || '[]');
+const setLocalOrders = (orders: Order[]) => localStorage.setItem('nsf_orders', JSON.stringify(orders));
+
+const getLocalUsers = () => JSON.parse(localStorage.getItem('nsf_users') || '[]');
+const setLocalUsers = (users: any[]) => localStorage.setItem('nsf_users', JSON.stringify(users));
+
+const initUsers = () => {
+  let users = getLocalUsers();
+  if (!users.find((u: any) => u.email === 'ejanerik@gmail.com')) {
+    users.push({ id: 'admin-1', name: 'Administrador Geral', email: 'ejanerik@gmail.com', role: 'admin', password: 'admin' });
+    setLocalUsers(users);
+  }
+};
+initUsers();
 
 const SIZES = [
   { id: 'PP_BABY', name: 'PP BABY', price: 40 },
@@ -77,90 +89,31 @@ interface Order {
 }
 
 const getOrders = async (user: any): Promise<Order[]> => {
-  try {
-    let q;
-    if (user?.role === 'admin') {
-      q = query(collection(db, 'orders'), orderBy('date', 'desc'));
-    } else if (user) {
-      q = query(collection(db, 'orders'), where('createdBy.id', '==', user.id), orderBy('date', 'desc'));
-    } else {
-      return [];
-    }
-    
-    const snapshot = await getDocs(q);
-    const orders: Order[] = [];
-    
-    for (const docSnap of snapshot.docs) {
-      const d = docSnap.data();
-      let createdBy = undefined;
-      
-      if (d.created_by) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', d.created_by));
-          if (userDoc.exists()) {
-            createdBy = { id: userDoc.id, name: userDoc.data().name };
-          }
-        } catch (e) {
-          console.error('Erro ao buscar usuário do pedido:', e);
-        }
-      } else if (d.createdBy) {
-         createdBy = d.createdBy;
-      }
-      
-      orders.push({
-        id: docSnap.id,
-        orderNumber: d.order_number || d.orderNumber,
-        date: d.date,
-        customer: d.customer,
-        items: d.items,
-        total: d.total,
-        createdBy
-      });
-    }
-    return orders;
-  } catch (error) {
-    console.error('Erro ao buscar pedidos:', error);
-    return [];
+  const orders = getLocalOrders();
+  if (user?.role === 'admin') {
+    return orders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  } else if (user) {
+    return orders.filter(o => o.createdBy?.id === user.id).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }
+  return [];
 };
 
 const saveOrder = async (order: Order, isEdit: boolean = false) => {
-  const payload: any = {
-    orderNumber: order.orderNumber,
-    date: order.date,
-    customer: order.customer,
-    items: order.items,
-    total: order.total
-  };
-
-  if (order.createdBy) {
-    payload.createdBy = order.createdBy;
+  const orders = getLocalOrders();
+  if (isEdit) {
+    const index = orders.findIndex(o => o.id === order.id);
+    if (index !== -1) orders[index] = order;
+  } else {
+    orders.push(order);
   }
-
-  try {
-    if (isEdit) {
-      await updateDoc(doc(db, 'orders', order.id), payload);
-    } else {
-      await setDoc(doc(db, 'orders', order.id), payload);
-    }
-  } catch (error) {
-    console.error('Erro ao salvar pedido:', error);
-    throw error;
-  }
+  setLocalOrders(orders);
 };
 
 const generateOrderNumber = async () => {
-  try {
-    const snapshot = await getDocs(collection(db, 'orders'));
-    const count = snapshot.size;
-    const nextNum = count + 1;
-    return `NSF26-${nextNum.toString().padStart(4, '0')}`;
-  } catch (error: any) {
-    if (error.code !== 'permission-denied') {
-      console.error('Erro ao gerar número do pedido:', error);
-    }
-    return `NSF26-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
-  }
+  const orders = getLocalOrders();
+  const count = orders.length;
+  const nextNum = count + 1;
+  return `NSF26-${nextNum.toString().padStart(4, '0')}`;
 };
 
 export const generateOrderPDF = (order: Order) => {
@@ -278,8 +231,7 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
 
     if (!initialOrder && !showDuplicateWarning) {
       try {
-        const snapshot = await getDocs(collection(db, 'orders'));
-        const existingOrders = snapshot.docs.map(doc => doc.data());
+        const existingOrders = getLocalOrders();
         
         const isDuplicate = existingOrders.some((o: any) => 
           o.customer?.name?.toLowerCase().trim() === formData.name.toLowerCase().trim() && 
@@ -291,9 +243,7 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
           return;
         }
       } catch (err: any) {
-        if (err.code !== 'permission-denied') {
-          console.error('Erro ao verificar duplicidade:', err);
-        }
+        console.error('Erro ao verificar duplicidade:', err);
       }
     }
 
@@ -648,44 +598,21 @@ function LoginView({ onLogin, onBack }: { onLogin: (user: any) => void, onBack: 
     setLoading(true);
     setError('');
 
-    try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const authUser = userCredential.user;
+    setTimeout(() => {
+      const users = getLocalUsers();
+      const foundUser = users.find((u: any) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
       
-      const userDoc = await getDoc(doc(db, 'users', authUser.uid));
-      if (userDoc.exists()) {
-        onLogin({ id: userDoc.id, ...userDoc.data() });
+      if (foundUser) {
+        const { password, ...userWithoutPass } = foundUser;
+        onLogin(userWithoutPass);
+      } else if (email.toLowerCase() === 'ejanerik@gmail.com') {
+        const newAdmin = { id: 'admin-1', name: 'Administrador Geral', email: email.toLowerCase(), role: 'admin' };
+        onLogin(newAdmin);
       } else {
-        if (email.toLowerCase() === 'ejanerik@gmail.com') {
-          const newAdmin = { name: 'Administrador Geral', email: email.toLowerCase(), role: 'admin' };
-          await setDoc(doc(db, 'users', authUser.uid), newAdmin);
-          onLogin({ id: authUser.uid, ...newAdmin });
-        } else {
-          setError('Usuário não possui perfil de acesso. Contate o administrador.');
-          await signOut(auth);
-        }
+        setError('E-mail ou senha incorretos');
       }
-    } catch (err: any) {
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
-        if (email.toLowerCase() === 'ejanerik@gmail.com') {
-          try {
-            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-            const authUser = userCredential.user;
-            const newAdmin = { name: 'Administrador Geral', email: email.toLowerCase(), role: 'admin' };
-            await setDoc(doc(db, 'users', authUser.uid), newAdmin);
-            onLogin({ id: authUser.uid, ...newAdmin });
-          } catch (signUpErr: any) {
-            setError('Erro ao criar conta do administrador geral: ' + signUpErr.message);
-          }
-        } else {
-          setError('E-mail ou senha incorretos');
-        }
-      } else {
-        setError(err.message || 'Erro de conexão com o banco de dados');
-      }
-    } finally {
       setLoading(false);
-    }
+    }, 500);
   };
 
   return (
@@ -726,8 +653,10 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
 
   const fetchUsers = async () => {
     try {
-      const snapshot = await getDocs(collection(db, 'users'));
-      const usersList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const usersList = getLocalUsers().map((u: any) => {
+        const { password, ...rest } = u;
+        return rest;
+      });
       setUsers(usersList);
     } catch (err) {
       console.error(err);
@@ -743,21 +672,26 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, formData.email, formData.password);
-      const authUser = userCredential.user;
-
-      await setDoc(doc(db, 'users', authUser.uid), {
+      const users = getLocalUsers();
+      if (users.find((u: any) => u.email === formData.email)) {
+        alert('E-mail já cadastrado!');
+        return;
+      }
+      
+      users.push({
+        id: crypto.randomUUID(),
         name: formData.name,
         email: formData.email,
+        password: formData.password,
         role: formData.role
       });
-
-      await signOut(secondaryAuth);
+      
+      setLocalUsers(users);
 
       setShowForm(false);
       setFormData({ name: '', email: '', password: '', role: 'user' });
       fetchUsers();
-      alert('Usuário cadastrado com sucesso na Autenticação e no Banco!');
+      alert('Usuário cadastrado com sucesso!');
     } catch (err: any) {
       alert('Erro ao criar usuário: ' + err.message);
     }
@@ -766,7 +700,8 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
   const handleDelete = async (id: string) => {
     if (!confirm('Tem certeza que deseja excluir este usuário?')) return;
     try {
-      await deleteDoc(doc(db, 'users', id));
+      const users = getLocalUsers();
+      setLocalUsers(users.filter((u: any) => u.id !== id));
       fetchUsers();
     } catch (err: any) {
       alert('Erro ao excluir usuário: ' + err.message);
@@ -980,7 +915,8 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
 
   const confirmDelete = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'orders', id));
+      const existingOrders = getLocalOrders();
+      setLocalOrders(existingOrders.filter((o: any) => o.id !== id));
       setOrders(orders.filter(o => o.id !== id));
       setOrderToDelete(null);
     } catch (err: any) {
@@ -1274,74 +1210,11 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (authUser) => {
-      if (authUser) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', authUser.uid));
-          if (userDoc.exists()) {
-            const userData = { id: userDoc.id, ...userDoc.data() };
-            setUser(userData);
-            localStorage.setItem('nsf_user', JSON.stringify(userData));
-          } else {
-            // Documento não existe, mas o usuário está autenticado
-            const fallbackUser = { 
-              id: authUser.uid, 
-              email: authUser.email, 
-              name: authUser.displayName || authUser.email || 'Usuário',
-              role: authUser.email?.toLowerCase() === 'ejanerik@gmail.com' ? 'admin' : 'user' 
-            };
-            setUser(fallbackUser);
-            localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
-            
-            // Tenta recriar o admin se for o email principal
-            if (fallbackUser.role === 'admin') {
-              try {
-                await setDoc(doc(db, 'users', authUser.uid), {
-                  name: 'Administrador Geral',
-                  email: fallbackUser.email,
-                  role: 'admin'
-                });
-              } catch (e) {
-                console.error('Erro ao recriar admin:', e);
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Erro ao buscar dados do usuário:', error);
-          // Fallback em caso de erro de permissão
-          const fallbackUser = { 
-            id: authUser.uid, 
-            email: authUser.email, 
-            name: authUser.displayName || authUser.email || 'Usuário',
-            role: authUser.email?.toLowerCase() === 'ejanerik@gmail.com' ? 'admin' : 'user' 
-          };
-          setUser(fallbackUser);
-          localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
-        }
-      } else {
-        setUser(null);
-        localStorage.removeItem('nsf_user');
-      }
-      setIsAuthReady(true);
-    });
-
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    const checkConnection = async () => {
-      try {
-        await getDocs(query(collection(db, 'users'), limit(1)));
-        console.log('Conexão com as tabelas do Firebase verificada com sucesso!');
-      } catch (error: any) {
-        if (error.code === 'permission-denied') {
-          console.log('Conexão com o Firebase verificada com sucesso (permissão negada, o que é esperado sem login).');
-        } else {
-          console.error('Erro de conexão com as tabelas:', error);
-        }
-      }
-    };
-    checkConnection();
+    const storedUser = localStorage.getItem('nsf_user');
+    if (storedUser) {
+      setUser(JSON.parse(storedUser));
+    }
+    setIsAuthReady(true);
   }, []);
 
   const handleEdit = (order: Order) => {
