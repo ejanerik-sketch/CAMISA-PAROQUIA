@@ -140,6 +140,37 @@ app.delete('/api/admin/delete-user/:id', async (req, res) => {
   }
 });
 
+// Admin: Check Database Tables
+app.get('/api/admin/check-db', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!supabaseAdmin) return res.status(500).json({ error: 'Admin Client not configured' });
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const results = {
+      users: false,
+      orders: false,
+      order_items: false
+    };
+
+    // Check users table
+    const { error: errUsers } = await supabaseAdmin.from('users').select('id').limit(1);
+    results.users = !errUsers;
+
+    // Check orders table
+    const { error: errOrders } = await supabaseAdmin.from('orders').select('id').limit(1);
+    results.orders = !errOrders;
+
+    // Check order_items table
+    const { error: errItems } = await supabaseAdmin.from('order_items').select('id').limit(1);
+    results.order_items = !errItems;
+
+    res.json({ success: true, tables: results });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/send-welcome-email', async (req, res) => {
   const { name, email, password } = req.body;
 

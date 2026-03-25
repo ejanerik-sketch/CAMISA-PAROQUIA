@@ -714,7 +714,21 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [dbStatus, setDbStatus] = useState<any>(null);
   const [formData, setFormData] = useState({ name: '', email: '', password: '', role: 'user' });
+
+  const checkDatabase = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch('/api/admin/check-db', {
+        headers: { 'Authorization': `Bearer ${session?.access_token}` }
+      });
+      const result = await response.json();
+      if (result.success) setDbStatus(result.tables);
+    } catch (err) {
+      console.error('Erro ao verificar DB:', err);
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -733,6 +747,7 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
 
   useEffect(() => {
     fetchUsers();
+    checkDatabase();
   }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -801,6 +816,23 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
           <UserPlus size={18} /> Novo Usuário
         </button>
       </div>
+
+      {dbStatus && (
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 mb-6 flex flex-wrap gap-4 items-center">
+          <span className="text-xs font-bold text-slate-500 uppercase">Status das Tabelas:</span>
+          <div className="flex gap-3">
+            {Object.entries(dbStatus).map(([table, status]) => (
+              <div key={table} className="flex items-center gap-1.5">
+                <div className={`w-2 h-2 rounded-full ${status ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
+                <span className="text-xs font-medium text-slate-700 capitalize">{table.replace('_', ' ')}</span>
+              </div>
+            ))}
+          </div>
+          {!Object.values(dbStatus).every(v => v) && (
+            <span className="text-[10px] text-red-500 font-bold animate-pulse">Algumas tabelas não foram encontradas!</span>
+          )}
+        </div>
+      )}
 
       {showForm && (
         <form onSubmit={handleCreate} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-6">
@@ -1381,49 +1413,45 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   useEffect(() => {
-    const initApp = async () => {
-      // Monitorar estado da autenticação oficial
-      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-        if (session?.user) {
-          // Buscar dados extras do perfil na tabela pública
-          const { data: profile, error: profileError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', session.user.id)
-            .single();
-          
-          if (profile) {
-            setUser(profile);
-            localStorage.setItem('nsf_user', JSON.stringify(profile));
-            if (event === 'SIGNED_IN' || view === 'login') {
-              setView('form');
-            }
-          } else {
-            // Se não encontrar o perfil na tabela pública, cria um temporário com os dados do Auth
-            const fallbackUser = {
-              id: session.user.id,
-              name: session.user.user_metadata?.name || 'Usuário',
-              email: session.user.email,
-              role: session.user.user_metadata?.role || 'user'
-            };
-            setUser(fallbackUser);
-            localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
-            if (event === 'SIGNED_IN' || view === 'login') {
-              setView('form');
-            }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        // Buscar dados extras do perfil na tabela pública
+        const { data: profile } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', session.user.id)
+          .single();
+        
+        if (profile) {
+          setUser(profile);
+          localStorage.setItem('nsf_user', JSON.stringify(profile));
+          // Só redireciona se estiver na tela de login ou se acabou de entrar
+          if (event === 'SIGNED_IN') {
+            setView('form');
           }
         } else {
-          setUser(null);
-          localStorage.removeItem('nsf_user');
+          // Se não encontrar o perfil na tabela pública, cria um temporário com os dados do Auth
+          const fallbackUser = {
+            id: session.user.id,
+            name: session.user.user_metadata?.name || 'Usuário',
+            email: session.user.email,
+            role: session.user.user_metadata?.role || 'user'
+          };
+          setUser(fallbackUser);
+          localStorage.setItem('nsf_user', JSON.stringify(fallbackUser));
+          if (event === 'SIGNED_IN') {
+            setView('form');
+          }
         }
-        setIsAuthReady(true);
-      });
+      } else {
+        setUser(null);
+        localStorage.removeItem('nsf_user');
+      }
+      setIsAuthReady(true);
+    });
 
-      return () => subscription.unsubscribe();
-    };
-
-    initApp();
-  }, [view]);
+    return () => subscription.unsubscribe();
+  }, []);
 
   const handleEdit = (order: Order) => {
     setEditingOrder(order);
