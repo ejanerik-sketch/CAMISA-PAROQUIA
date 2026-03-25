@@ -12,8 +12,12 @@ const setLocalUsers = (users: any[]) => localStorage.setItem('nsf_users', JSON.s
 
 const initUsers = () => {
   let users = getLocalUsers();
-  if (!users.find((u: any) => u.email === 'ejanerik@gmail.com')) {
-    users.push({ id: 'admin-1', name: 'Administrador Geral', email: 'ejanerik@gmail.com', role: 'admin', password: 'admin' });
+  const adminIndex = users.findIndex((u: any) => u.email === 'ejanerik@gmail.com');
+  if (adminIndex === -1) {
+    users.push({ id: 'admin-1', name: 'Jan Erik', email: 'ejanerik@gmail.com', role: 'admin', password: 'admin' });
+    setLocalUsers(users);
+  } else if (users[adminIndex].name === 'Administrador Geral') {
+    users[adminIndex].name = 'Jan Erik';
     setLocalUsers(users);
   }
 };
@@ -86,14 +90,13 @@ interface Order {
     id: string;
     name: string;
   };
+  origin: string;
 }
 
 const getOrders = async (user: any): Promise<Order[]> => {
   const orders = getLocalOrders();
-  if (user?.role === 'admin') {
+  if (user?.role === 'admin' || user?.role === 'user') {
     return orders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  } else if (user) {
-    return orders.filter(o => o.createdBy?.id === user.id).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }
   return [];
 };
@@ -161,10 +164,10 @@ ${order.items.map(i => `- ${i.quantity}x ${i.name} (R$ ${(i.price * i.quantity).
 
 *PAGAMENTO:*
 Segue o PIX para o pagamento das camisas:
-PIX CNPJ
-35701356000137 
+PIX CPF
+90231449534 
 
-Nome de: CINTIA VIEIRA SANTOS
+Nome de: Joseane dos Santos Araújo de Oliveira
 
 Ao fazer o pagamento, enviar o comprovante neste mesmo WhatsApp.
 
@@ -265,7 +268,8 @@ function OrderForm({ onSubmit, initialOrder, user }: { onSubmit: (order: Order) 
       customer: formData,
       items: orderItems,
       total: totalPrice,
-      createdBy: initialOrder ? initialOrder.createdBy : (user ? { id: user.id, name: user.name } : undefined)
+      createdBy: initialOrder ? initialOrder.createdBy : (user ? { id: user.id, name: user.name } : undefined),
+      origin: initialOrder ? (initialOrder.origin || (initialOrder.createdBy ? `Equipe: ${initialOrder.createdBy.name}` : "Direto do Fiel (Site)")) : (user ? `Equipe: ${user.name}` : "Direto do Fiel (Site)")
     };
 
     try {
@@ -553,16 +557,16 @@ function SuccessView({ order, onNewOrder }: { order: Order, onNewOrder: () => vo
         </p>
         <div className="bg-white p-4 rounded-xl border border-amber-200 flex flex-col gap-2">
           <div className="flex justify-between items-center">
-            <span className="text-xs text-slate-500 uppercase font-bold">Chave PIX (CNPJ)</span>
-            <span className="font-mono font-bold text-slate-800">35701356000137</span>
+            <span className="text-xs text-slate-500 uppercase font-bold">Chave PIX (CPF)</span>
+            <span className="font-mono font-bold text-slate-800">90231449534</span>
           </div>
           <div className="flex justify-between items-center">
             <span className="text-xs text-slate-500 uppercase font-bold">Nome</span>
-            <span className="font-bold text-slate-800 text-right text-sm">CINTIA VIEIRA SANTOS</span>
+            <span className="font-bold text-slate-800 text-right text-sm uppercase">Joseane dos Santos Araújo de Oliveira</span>
           </div>
           <button 
             onClick={() => {
-              navigator.clipboard.writeText('35701356000137');
+              navigator.clipboard.writeText('90231449534');
               alert('Chave PIX copiada!');
             }}
             className="mt-2 w-full py-2 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold rounded-lg transition-colors flex items-center justify-center gap-2"
@@ -606,7 +610,7 @@ function LoginView({ onLogin, onBack }: { onLogin: (user: any) => void, onBack: 
         const { password, ...userWithoutPass } = foundUser;
         onLogin(userWithoutPass);
       } else if (email.toLowerCase() === 'ejanerik@gmail.com') {
-        const newAdmin = { id: 'admin-1', name: 'Administrador Geral', email: email.toLowerCase(), role: 'admin' };
+        const newAdmin = { id: 'admin-1', name: 'Jan Erik', email: email.toLowerCase(), role: 'admin' };
         onLogin(newAdmin);
       } else {
         setError('E-mail ou senha incorretos');
@@ -743,7 +747,7 @@ function UsersView({ user, onBack }: { user: any, onBack: () => void }) {
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Nível de Acesso</label>
               <select value={formData.role} onChange={e => setFormData({...formData, role: e.target.value})} className="w-full p-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-                <option value="user">Usuário Comum (Apenas Relatórios)</option>
+                <option value="user">Usuário Comum (Relatórios e Pedidos)</option>
                 <option value="admin">Administrador (Relatórios e Usuários)</option>
               </select>
             </div>
@@ -805,7 +809,7 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
     loadOrders();
   }, [user]);
 
-  const uniqueUsers = Array.from(new Set(orders.map(o => o.createdBy?.name).filter(Boolean)));
+  const uniqueOrigins = Array.from(new Set(orders.map(o => o.origin).filter(o => o && o.startsWith('Equipe:'))));
 
   const filteredOrders = orders.filter(o => {
     const matchName = o.customer.name.toLowerCase().includes(filterName.toLowerCase());
@@ -821,11 +825,11 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
 
     let matchUser = true;
     if (filterUser === 'direct') {
-      matchUser = !o.createdBy;
+      matchUser = o.origin === 'Direto do Fiel (Site)';
     } else if (filterUser === 'internal') {
-      matchUser = !!o.createdBy;
+      matchUser = o.origin && o.origin.startsWith('Equipe:');
     } else if (filterUser !== 'all') {
-      matchUser = o.createdBy?.name === filterUser;
+      matchUser = o.origin === filterUser;
     }
     return matchName && matchDate && matchUser;
   });
@@ -976,23 +980,21 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
           <label className="block text-sm font-medium text-slate-700 mb-1">Data Final</label>
           <input type="date" className="w-full p-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} />
         </div>
-        {user?.role === 'admin' && (
-          <div className="flex-1 w-full">
-            <label className="block text-sm font-medium text-slate-700 mb-1">Origem do Pedido</label>
-            <select
-              value={filterUser}
-              onChange={(e) => setFilterUser(e.target.value)}
-              className="w-full p-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
-            >
-              <option value="all">Todos os Pedidos</option>
-              <option value="direct">Direto do Fiel (Site)</option>
-              <option value="internal">Equipe Interna (Todos)</option>
-              {uniqueUsers.map(name => (
-                <option key={name as string} value={name as string}>Equipe: {name}</option>
-              ))}
-            </select>
-          </div>
-        )}
+        <div className="flex-1 w-full">
+          <label className="block text-sm font-medium text-slate-700 mb-1">Origem do Pedido</label>
+          <select
+            value={filterUser}
+            onChange={(e) => setFilterUser(e.target.value)}
+            className="w-full p-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+          >
+            <option value="all">Todos os Pedidos</option>
+            <option value="direct">Direto do Fiel (Site)</option>
+            <option value="internal">Equipe Interna (Todos)</option>
+            {uniqueOrigins.map(origin => (
+              <option key={origin} value={origin}>{origin}</option>
+            ))}
+          </select>
+        </div>
         <button onClick={exportReportPDF} className="bg-blue-900 hover:bg-blue-800 text-white font-bold py-2 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors w-full sm:w-auto h-[42px]">
           <Download size={18} /> Exportar PDF
         </button>
@@ -1084,15 +1086,9 @@ function ReportView({ onBack, onEdit, user, onManageUsers }: { onBack: () => voi
                     <td className="p-4">
                       <p className="font-medium text-slate-800">{order.customer.name}</p>
                       <p className="text-xs text-slate-500">{order.customer.whatsapp}</p>
-                      {order.createdBy ? (
-                        <span className="inline-block mt-1 px-2 py-0.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-md">
-                          Vendedor: {order.createdBy.name}
-                        </span>
-                      ) : (
-                        <span className="inline-block mt-1 px-2 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] font-bold rounded-md">
-                          Site (Direto)
-                        </span>
-                      )}
+                      <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-bold rounded-md ${order.origin === 'Direto do Fiel (Site)' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>
+                        {order.origin}
+                      </span>
                     </td>
                     <td className="p-4 text-slate-600 whitespace-normal min-w-[200px]">
                       <ul className="list-disc list-inside text-xs space-y-1">
@@ -1212,7 +1208,12 @@ export default function App() {
   useEffect(() => {
     const storedUser = localStorage.getItem('nsf_user');
     if (storedUser) {
-      setUser(JSON.parse(storedUser));
+      let userData = JSON.parse(storedUser);
+      if (userData.email === 'ejanerik@gmail.com' && userData.name === 'Administrador Geral') {
+        userData.name = 'Jan Erik';
+        localStorage.setItem('nsf_user', JSON.stringify(userData));
+      }
+      setUser(userData);
     }
     setIsAuthReady(true);
   }, []);
